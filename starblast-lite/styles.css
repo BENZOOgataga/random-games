@@ -1,0 +1,12 @@
+:root { color-scheme: dark; }
+html, body { margin:0; height:100%; background:#06080d; color:#e5f0ff; font:14px/1.35 system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+#game { display:block; width:100vw; height:100vh; image-rendering:pixelated; }
+#ui { position:fixed; left:8px; top:8px; display:flex; gap:8px; align-items:center; }
+.chip { background:#0b111b; border:1px solid #27344e; padding:6px 10px; border-radius:8px; }
+.bar { position:fixed; left:8px; right:8px; top:44px; height:10px; background:#1b2230; border:1px solid #2d3a55; border-radius:6px; overflow:hidden; }
+.bar > span { display:block; height:100%; background:#4bb6ff; width:0%; transition:width .1s linear; }
+#overlay { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,.45); }
+#overlay:not(.show) { display:none; }
+#panel { background:#0a1018; border:1px solid #2c3a58; border-radius:12px; padding:16px; width:min(520px, 94vw); }
+.btn { background:#0d1522; color:#cfe4ff; border:1px solid #2b3b5c; padding:6px 10px; border-radius:8px; cursor:pointer; }
+.btn:disabled { opacity:.5; cursor:not-allowed; }
