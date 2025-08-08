@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<title>Starblast-like Modern</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root{
+    --bg1:#06070b; --bg2:#0a0f1a; --panel:rgba(14,22,35,.55);
+    --txt:#e9f4ff; --acc:#6ee6ff; --acc2:#b9ffdb;
+  }
+  html,body{margin:0;height:100%;background:radial-gradient(1200px 800px at 50% 60%, var(--bg2) 0%, var(--bg1) 70%);}
+  body{color:var(--txt);font-family:Consolas,Menlo,monospace;display:grid;place-items:center}
+  #wrap{position:relative}
+  canvas{display:block;border-radius:14px;box-shadow:0 10px 40px rgba(0,0,0,.6), inset 0 0 1px rgba(255,255,255,.08);}
+  #hud{position:absolute;inset:10px 10px auto 10px;display:flex;gap:12px;align-items:center;
+       padding:8px 12px;background:linear-gradient(180deg, rgba(14,22,35,.72), rgba(14,22,35,.45));
+       -webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);border:1px solid rgba(120,170,220,.15);border-radius:10px}
+  .chip{padding:4px 8px;border-radius:8px;background:rgba(120,220,255,.08);border:1px solid rgba(120,220,255,.18)}
+  #shop{position:absolute;left:50%;bottom:10px;transform:translateX(-50%);
+        padding:8px 12px;background:linear-gradient(180deg, rgba(14,22,35,.72), rgba(14,22,35,.45));
+        -webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);border:1px solid rgba(120,170,220,.15);border-radius:10px}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="view" width="1120" height="700"></canvas>
+  <div id="hud">
+    <div class="chip">Score <span id="sc">0</span></div>
+    <div class="chip">Gems <span id="gm">0</span></div>
+    <div class="chip">HP <span id="hp">100</span></div>
+    <div class="chip">Shield <span id="sh">50</span></div>
+    <div class="chip">Tier <span id="tr">1</span></div>
+  </div>
+  <div id="shop">[1] Gun <span id="c1"></span>  [2] Speed <span id="c2"></span>  [3] Shield <span id="c3"></span>  [4] Cargo <span id="c4"></span></div>
+</div>
+
+<script>
+"use strict";
+
+// ========= Canvas setup with glow and trail =========
+const V = document.getElementById("view");
+const ctx = V.getContext("2d", {alpha:true});
+const glow = document.createElement("canvas");
+glow.width = V.width; glow.height = V.height;
+const gtx = glow.getContext("2d", {alpha:true});
+const trail = document.createElement("canvas");
+trail.width = V.width; trail.height = V.height;
+const ttx = trail.getContext("2d", {alpha:true});
+
+// ========= Shortcuts =========
+const rnd = n=>Math.random()*n, rndi=n=>(Math.random()*n)|0;
+const clamp=(x,a,b)=>x<a?a:x>b?b:x;
+
+// ========= UI =========
+const ui = id=>document.getElementById(id);
+const updUI = ()=>{
+  ui("sc").textContent = Math.floor(score);
+  ui("gm").textContent = gems|0;
+  ui("hp").textContent = Math.max(0, ship.hp|0);
+  ui("sh").textContent = Math.max(0, ship.shield|0);
+  ui("tr").textContent = ship.tier;
+  ui("c1").textContent = "("+costs.gun+")";
+  ui("c2").textContent = "("+costs.speed+")";
+  ui("c3").textContent = "("+costs.shield+")";
+  ui("c4").textContent = "("+costs.cargo+")";
+};
+
+// ========= Input =========
+const keys = Object.create(null);
+addEventListener("keydown", e=>{
+  if(e.code==="Space"){ keys.space=true; e.preventDefault(); }
+  keys[e.code] = true;
+});
+addEventListener("keyup", e=>{
+  if(e.code==="Space"){ keys.space=false; e.preventDefault(); }
+  keys[e.code] = false;
+});
+
+// ========= Stars (parallax + chroma) =========
+const W=V.width,H=V.height;
+const stars = Array.from({length:220}, _=>({x:rnd(W),y:rnd(H),z:0.5+rnd(1.5),tw:rnd(1)}));
+
+// ========= Game state =========
+let score=0,gems=0,shake=0;
+const costs={gun:35,speed:30,shield:40,cargo:25};
+const incCost=(k,m)=>costs[k]=Math.ceil(costs[k]*m);
+
+const ship={
+  x:W/2,y:H/2,vx:0,vy:0,a:-Math.PI/2,
+  thrust:270,turn:3.4,friction:.994,
+  fireCd:0, fireRate:.13, bulletDmg:12,
+  hp:100,maxHp:100, shield:60,maxShield:60, shieldRegen:7, shieldDelay:1.4, shieldTimer:0,
+  tier:1, cargo:0,cargoMax:60, inv:0, hurt:0
+};
+
+const bullets=[], rocks=[], gemsItems=[], particles=[];
+
+// ========= Spawning =========
+function makeRock(x,y,size){
+  const v=40+rnd(110), ang=Math.atan2(H/2-y, W/2-x)+(rnd(1)-.5)*.7;
+  return {x,y,vx:Math.cos(ang)*v,vy:Math.sin(ang)*v,size,
+          rot:rnd(Math.PI*2),rv:(rnd(1)-.5)*2.1,hp:12+size*1.6,dead:false};
+}
+function spawnRocks(n=5){
+  for(let i=0;i<n;i++){
+    const size=[24,30,38,50][rndi(4)];
+    const edge=rndi(4);
+    const x = edge===0?-40: edge===1?W+40: rnd(W);
+    const y = edge===2?-40: edge===3?H+40: rnd(H);
+    rocks.push(makeRock(x,y,size));
+  }
+}
+
+// ========= Helpers =========
+function particlesBurst(x,y,n,col=[160,230,255]){
+  for(let i=0;i<n;i++){
+    const a=rnd(Math.PI*2), s=80+rnd(340);
+    particles.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,life:.45+rnd(.5),t:0,col});
+  }
+}
+function splitRock(r){
+  if(r.size<=22) return;
+  if(Math.random()<.42){
+    for(const sgn of [-1,1]){
+      const ns=Math.max(18,(r.size*.6)|0);
+      const c=makeRock(r.x+sgn*8,r.y-6,ns);
+      c.vx+=sgn*(50+rnd(100)); c.vy-=20+rnd(70);
+      rocks.push(c);
+    }
+  }
+}
+function dropGems(x,y,val){
+  const per=6, n=Math.ceil(val/per);
+  for(let i=0;i<n;i++){
+    const a=rnd(Math.PI*2), s=60+rnd(140);
+    gemsItems.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,value:per,t:0});
+  }
+}
+
+// ========= Shooting =========
+function shoot(){
+  if(ship.fireCd>0) return;
+  ship.fireCd = ship.fireRate;
+  const spread = ship.tier>=3? .06 : ship.tier>=2? .03 : 0;
+  const shots = ship.tier>=4? 3 : 2;
+  for(let i=0;i<shots;i++){
+    const s = i===0? -spread : spread;
+    const a = ship.a + (i===1? s : (shots===3 && i===2? -s : 0));
+    const spd = 560;
+    bullets.push({
+      x: ship.x + Math.cos(ship.a)*22,
+      y: ship.y + Math.sin(ship.a)*22,
+      vx: Math.cos(a)*spd, vy: Math.sin(a)*spd,
+      dmg: ship.bulletDmg, life:.9
+    });
+  }
+  shake = Math.max(shake,.08);
+}
+
+// ========= Shop =========
+addEventListener("keydown", e=>{
+  if(e.key==="1"&&gems>=costs.gun){ gems-=costs.gun; ship.tier=Math.min(5,ship.tier+1); ship.fireRate=Math.max(.07,ship.fireRate*.88); ship.bulletDmg+=3; incCost("gun",1.7); shake=Math.max(shake,.1); }
+  if(e.key==="2"&&gems>=costs.speed){ gems-=costs.speed; ship.thrust+=45; ship.turn+=.12; incCost("speed",1.55); shake=Math.max(shake,.1); }
+  if(e.key==="3"&&gems>=costs.shield){ gems-=costs.shield; ship.maxShield+=18; ship.shieldRegen+=2; ship.shield=ship.maxShield; incCost("shield",1.65); }
+  if(e.key==="4"&&gems>=costs.cargo){ gems-=costs.cargo; ship.cargoMax+=28; incCost("cargo",1.5); }
+});
+
+// ========= Draw primitives (neon) =========
+function drawShip(cx,cy,a){
+  // glow to glow-layer
+  gtx.save(); gtx.translate(cx,cy); gtx.rotate(a);
+  for(let i=16;i>0;i-=4){
+    gtx.globalAlpha = .05*i;
+    gtx.fillStyle = "#7de8ff";
+    shipShape(gtx, 22+i*.7);
+  }
+  gtx.restore();
+  // crisp outline to main
+  ctx.save(); ctx.translate(cx,cy); ctx.rotate(a);
+  ctx.fillStyle = ship.hurt>0? "#ff9aa8" : "#d9f7ff";
+  shipShape(ctx, 22);
+  // engine flame
+  const f = 12 + Math.sin(performance.now()*0.02)*3;
+  ctx.fillStyle = "rgba(140,230,255,.85)";
+  ctx.beginPath(); ctx.moveTo(-16,4); ctx.lineTo(-6, 9+f); ctx.lineTo(-2,4); ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+function shipShape(c, s){
+  c.beginPath();
+  c.moveTo(22,0);
+  c.lineTo(-11,-s*0.6);
+  c.lineTo(-6,-s*0.18);
+  c.lineTo(-6,s*0.18);
+  c.lineTo(-11,s*0.6);
+  c.closePath();
+  c.fill();
+}
+function polyCirclePath(c,r,n){
+  c.beginPath();
+  for(let i=0;i<n;i++){
+    const a=i/n*Math.PI*2, x=Math.cos(a)*r, y=Math.sin(a)*r;
+    if(i===0)c.moveTo(x,y); else c.lineTo(x,y);
+  }
+  c.closePath();
+}
+
+// ========= Loop =========
+let last=performance.now()/1000;
+spawnRocks(10); updUI();
+requestAnimationFrame(function loop(){
+  const now=performance.now()/1000; let dt=now-last; last=now; if(dt>.05) dt=.05;
+
+  // input
+  if(keys["ArrowLeft"]||keys["KeyA"]) ship.a -= ship.turn*dt;
+  if(keys["ArrowRight"]||keys["KeyD"]) ship.a += ship.turn*dt;
+  if(keys["ArrowUp"]||keys["KeyW"]){
+    ship.vx += Math.cos(ship.a)*ship.thrust*dt;
+    ship.vy += Math.sin(ship.a)*ship.thrust*dt;
+    particlesBurst(ship.x-Math.cos(ship.a)*20, ship.y-Math.sin(ship.a)*20, 2, [120,210,255]);
+  }
+  if(keys.space) shoot();
+
+  // physics
+  ship.vx*=ship.friction; ship.vy*=ship.friction;
+  ship.x+=ship.vx*dt; ship.y+=ship.vy*dt;
+  if(ship.x<0) ship.x+=W; if(ship.x>W) ship.x-=W;
+  if(ship.y<0) ship.y+=H; if(ship.y>H) ship.y-=H;
+
+  ship.fireCd=Math.max(0,ship.fireCd-dt);
+  ship.inv=Math.max(0,ship.inv-dt);
+  ship.hurt=Math.max(0,ship.hurt-dt);
+  ship.shieldTimer=Math.max(0,ship.shieldTimer-dt);
+  if(ship.shieldTimer<=0) ship.shield=clamp(ship.shield+ship.shieldRegen*dt,0,ship.maxShield);
+
+  // stars
+  for(const s of stars){ s.y+=20*s.z*dt; if(s.y>H){s.y=-2; s.x=rnd(W);} }
+
+  // bullets
+  for(const b of bullets){ b.x+=b.vx*dt; b.y+=b.vy*dt; b.life-=dt; }
+  for(let i=bullets.length-1;i>=0;i--){ const b=bullets[i]; if(b.life<=0||b.x<-30||b.x>W+30||b.y<-30||b.y>H+30) bullets.splice(i,1); }
+
+  // rocks
+  if(rocks.length<20 && Math.random()<.02) spawnRocks(1);
+  for(const r of rocks){
+    r.x+=r.vx*dt; r.y+=r.vy*dt; r.rot+=r.rv*dt;
+    if(r.x<-70) r.x=W+70; if(r.x>W+70) r.x=-70;
+    if(r.y<-70) r.y=H+70; if(r.y>H+70) r.y=-70;
+  }
+
+  // gems physics
+  for(const g of gemsItems){ g.vy+=45*dt; g.x+=g.vx*dt; g.y+=g.vy*dt; g.vx*=.985; g.vy*=.985; }
+
+  // collisions bullets -> rocks
+  for(const b of bullets){
+    for(const r of rocks){
+      const dx=b.x-r.x, dy=b.y-r.y;
+      if(dx*dx+dy*dy < (r.size*.55)*(r.size*.55)){
+        r.hp-=b.dmg; b.life=0; shake=Math.max(shake,.08);
+        if(r.hp<=0 && !r.dead){
+          r.dead=true; score+=10; dropGems(r.x,r.y,8+(r.size|0)); splitRock(r); particlesBurst(r.x,r.y,20,[255,220,160]);
+        }
+        break;
+      }
+    }
+  }
+  for(let i=rocks.length-1;i>=0;i--) if(rocks[i].dead) rocks.splice(i,1);
+
+  // ship vs rocks
+  for(const r of rocks){
+    const dx=ship.x-r.x, dy=ship.y-r.y;
+    if(dx*dx+dy*dy < (r.size*.55+14)*(r.size*.55+14) && ship.inv<=0){
+      let dmg=18+r.size*.45;
+      if(ship.shield>0){ const take=Math.min(ship.shield,dmg); ship.shield-=take; dmg-=take; }
+      ship.hp-=dmg; ship.inv=.6; ship.hurt=.25; shake=Math.max(shake,.22); particlesBurst(ship.x,ship.y,14,[255,120,140]);
+      if(ship.hp<=0){
+        ship.hp=ship.maxHp; ship.shield=ship.maxShield; ship.x=W/2; ship.y=H/2; ship.vx=ship.vy=0; ship.inv=1.2; score=Math.max(0,score-60);
+      }
+    }
+  }
+
+  // collect gems
+  for(let i=gemsItems.length-1;i>=0;i--){
+    const g=gemsItems[i]; const dx=ship.x-g.x, dy=ship.y-g.y; const d2=dx*dx+dy*dy;
+    if(d2<26*26){
+      if(ship.cargo+g.value<=ship.cargoMax){ gems+=g.value; ship.cargo+=g.value; gemsItems.splice(i,1); }
+    }else if(d2<170*170){
+      const d=Math.sqrt(d2)||1; g.vx+=(dx/d)*70*dt; g.vy+=(dy/d)*70*dt;
+    }
+  }
+  // convert cargo to score slowly
+  if(ship.cargo>0){ const u=Math.min(ship.cargo, 12*dt); ship.cargo-=u; score+=u*.6; }
+
+  // shake offsets
+  const ox = shake>0 ? (Math.random()-0.5)*12*shake : 0;
+  const oy = shake>0 ? (Math.random()-0.5)*12*shake : 0;
+  shake = Math.max(0, shake - dt*2.1);
+
+  // ======== RENDER: trail -> base -> glow -> bloom composite ========
+  // fade trail
+  ttx.globalCompositeOperation="source-over";
+  ttx.fillStyle="rgba(6,8,14,0.16)";
+  ttx.fillRect(0,0,W,H);
+
+  // draw scene crisp to ctx, glow elements to gtx
+  ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,W,H);
+  gtx.setTransform(1,0,0,1,0,0); gtx.clearRect(0,0,W,H);
+
+  // parallax stars with subtle chroma offset
+  for(const s of stars){
+    const yy=s.y+oy, xx=s.x+ox;
+    ctx.fillStyle="rgba(255,255,255,.7)"; ctx.fillRect(xx,yy,s.z<1?1:2,s.z<1?1:2);
+    gtx.fillStyle="rgba(125,230,255,.5)"; gtx.fillRect(xx+1,yy,2,2);
+  }
+
+  // rocks
+  for(const r of rocks){
+    // glow edge
+    gtx.save(); gtx.translate(r.x+ox, r.y+oy); gtx.rotate(r.rot);
+    gtx.fillStyle="rgba(140,180,255,.22)";
+    polyCirclePath(gtx, r.size*.6, 9); gtx.fill(); gtx.restore();
+    // body
+    ctx.save(); ctx.translate(r.x+ox, r.y+oy); ctx.rotate(r.rot);
+    const g=ctx.createRadialGradient(0,0,2, -r.size*0.25,-r.size*0.25, r.size*0.65);
+    g.addColorStop(0,"#e5eaf4"); g.addColorStop(1,"#7b8aa3");
+    ctx.fillStyle=g; polyCirclePath(ctx, r.size*.58, 9); ctx.fill(); ctx.restore();
+  }
+
+  // gems
+  for(const gm of gemsItems){
+    gtx.save(); gtx.translate(gm.x+ox, gm.y+oy);
+    gtx.fillStyle="rgba(120,240,255,.85)"; gtx.beginPath(); gtx.arc(0,0,10,0,Math.PI*2); gtx.fill(); gtx.restore();
+    ctx.save(); ctx.translate(gm.x+ox, gm.y+oy);
+    ctx.fillStyle="#cfffff"; polyCirclePath(ctx, 7, 6); ctx.fill(); ctx.restore();
+  }
+
+  // bullets
+  for(const b of bullets){
+    gtx.save(); gtx.translate(b.x+ox, b.y+oy);
+    gtx.fillStyle="rgba(140,240,255,.9)"; gtx.fillRect(-3,-14,6,28); gtx.restore();
+    ctx.save(); ctx.translate(b.x+ox, b.y+oy);
+    const grad=ctx.createLinearGradient(0,-14,0,14); grad.addColorStop(0,"#dffaff"); grad.addColorStop(1,"#7ddfff");
+    ctx.fillStyle=grad; ctx.fillRect(-2,-12,4,24); ctx.restore();
+  }
+
+  // particles to trail (for smooth motion blur)
+  for(const p of particles){
+    p.t+=dt; if(p.t>p.life){ particles.splice(particles.indexOf(p),1); continue; }
+    const a=1-p.t/p.life; ttx.fillStyle=`rgba(${p.col[0]},${p.col[1]},${p.col[2]},${(a*.6).toFixed(2)})`;
+    ttx.beginPath(); ttx.arc(p.x+ox, p.y+oy, 2+3*a, 0, Math.PI*2); ttx.fill();
+    p.x+=p.vx*dt; p.y+=p.vy*dt; p.vy+=60*dt;
+  }
+
+  // ship
+  drawShip(ship.x+ox, ship.y+oy, ship.a);
+
+  // composite trail
+  ctx.globalAlpha=1; ctx.drawImage(trail,0,0);
+
+  // fake bloom: blur glow by downscale-upscale and add
+  const dw= ~~(W/3), dh= ~~(H/3);
+  // allocate tmp only once
+  if(!window._b1){ window._b1=document.createElement("canvas"); window._b1.width=dw; window._b1.height=dh; window._b2=document.createElement("canvas"); window._b2.width=dw; window._b2.height=dh; }
+  const b1=window._b1.getContext("2d"), b2=window._b2.getContext("2d");
+  b1.clearRect(0,0,dw,dh); b2.clearRect(0,0,dw,dh);
+  b1.drawImage(glow,0,0,dw,dh);
+  b2.globalAlpha=.8; b2.drawImage(window._b1,0,0);
+  ctx.globalCompositeOperation="lighter";
+  ctx.globalAlpha=.9; ctx.drawImage(window._b2,0,0,W,H);
+  ctx.globalCompositeOperation="source-over"; ctx.globalAlpha=1;
+
+  // footer info
+  ctx.fillStyle="rgba(255,255,255,.75)"; ctx.font="14px Consolas, monospace";
+  ctx.fillText("Rotate <- ->, Thrust ^, Shoot Space, Upgrades 1-4, Cargo auto->Score", 12, H-12);
+
+  updUI();
+  requestAnimationFrame(loop);
+});
+
+// ========= Mechanics updates decoupled from render (collisions done above) =========
+setInterval(()=>{},1000);
+
+// ========= Collision helpers drawn above =========
+function polyCirclePath(c,r,n){ // redefined for scope
+  c.beginPath();
+  for(let i=0;i<n;i++){ const a=i/n*Math.PI*2,x=Math.cos(a)*r,y=Math.sin(a)*r; if(i===0)c.moveTo(x,y); else c.lineTo(x,y); }
+  c.closePath();
+}
+
+// ========= Periodic maintenance =========
+setInterval(()=>{
+  // move rocks/gems a tick for trail continuity (already moved each frame, keep minimal)
+},200);
+
+// ========= Extra spawning and timers inside render loop end =========
+</script>
+</body>
+</html>
